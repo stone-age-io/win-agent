@@ -175,6 +175,7 @@ func (s *Scheduler) Shutdown() error {
 }
 
 // publishHeartbeat publishes a heartbeat message
+// SIMPLIFIED: No retry loops, PublishAsync handles everything!
 func (s *Scheduler) publishHeartbeat(deviceID string) {
 	subject := fmt.Sprintf("agents.%s.heartbeat", deviceID)
 
@@ -185,13 +186,14 @@ func (s *Scheduler) publishHeartbeat(deviceID string) {
 		return
 	}
 
+	// PublishAsync is fire-and-forget with built-in retries
+	// Errors are logged automatically in the async callback
 	if err := s.nats.PublishTelemetry(subject, data); err != nil {
-		s.logger.Error("Failed to publish heartbeat",
-			zap.String("subject", subject),
-			zap.Error(err))
-	} else {
-		s.logger.Debug("Published heartbeat", zap.String("subject", subject))
+		// This only fails if we can't queue (extremely rare)
+		s.logger.Error("Failed to queue heartbeat publish", zap.Error(err))
 	}
+
+	// Success logging happens in the async callback - no need here
 }
 
 // publishMetrics scrapes and publishes system metrics
@@ -205,10 +207,10 @@ func (s *Scheduler) publishMetrics(deviceID string) {
 		// Publish error message so control plane knows scraping failed
 		errorMsg := tasks.CreateMetricsError(err)
 		data, _ := json.Marshal(errorMsg)
+		
+		// Even errors are published async - fire and forget
 		if err := s.nats.PublishTelemetry(subject, data); err != nil {
-			s.logger.Error("Failed to publish metrics error",
-				zap.String("subject", subject),
-				zap.Error(err))
+			s.logger.Error("Failed to queue metrics error publish", zap.Error(err))
 		}
 		return
 	}
@@ -219,17 +221,18 @@ func (s *Scheduler) publishMetrics(deviceID string) {
 		return
 	}
 
+	// Fire and forget with async retries
 	if err := s.nats.PublishTelemetry(subject, data); err != nil {
-		s.logger.Error("Failed to publish metrics",
-			zap.String("subject", subject),
-			zap.Error(err))
-	} else {
-		s.logger.Info("Published metrics",
-			zap.String("subject", subject),
-			zap.Float64("cpu_percent", metrics.CPUUsagePercent),
-			zap.Float64("memory_free_gb", metrics.MemoryFreeGB),
-			zap.Float64("disk_free_percent", metrics.DiskFreePercent))
+		s.logger.Error("Failed to queue metrics publish", zap.Error(err))
+		return
 	}
+
+	// Log success immediately (the actual publish happens in background)
+	s.logger.Info("Queued metrics publish",
+		zap.String("subject", subject),
+		zap.Float64("cpu_percent", metrics.CPUUsagePercent),
+		zap.Float64("memory_free_gb", metrics.MemoryFreeGB),
+		zap.Float64("disk_free_percent", metrics.DiskFreePercent))
 }
 
 // publishServiceStatus checks and publishes service status
@@ -247,10 +250,9 @@ func (s *Scheduler) publishServiceStatus(deviceID string) {
 			"timestamp": s.executor.CreateHeartbeat(s.version).Timestamp,
 		}
 		data, _ := json.Marshal(errorMsg)
+		
 		if err := s.nats.PublishTelemetry(subject, data); err != nil {
-			s.logger.Error("Failed to publish service status error",
-				zap.String("subject", subject),
-				zap.Error(err))
+			s.logger.Error("Failed to queue service status error publish", zap.Error(err))
 		}
 		return
 	}
@@ -268,14 +270,13 @@ func (s *Scheduler) publishServiceStatus(deviceID string) {
 	}
 
 	if err := s.nats.PublishTelemetry(subject, data); err != nil {
-		s.logger.Error("Failed to publish service statuses",
-			zap.String("subject", subject),
-			zap.Error(err))
-	} else {
-		s.logger.Debug("Published service statuses",
-			zap.String("subject", subject),
-			zap.Int("count", len(statuses)))
+		s.logger.Error("Failed to queue service status publish", zap.Error(err))
+		return
 	}
+
+	s.logger.Debug("Queued service status publish",
+		zap.String("subject", subject),
+		zap.Int("count", len(statuses)))
 }
 
 // publishInventory collects and publishes system inventory
@@ -295,12 +296,11 @@ func (s *Scheduler) publishInventory(deviceID string) {
 	}
 
 	if err := s.nats.PublishTelemetry(subject, data); err != nil {
-		s.logger.Error("Failed to publish inventory",
-			zap.String("subject", subject),
-			zap.Error(err))
-	} else {
-		s.logger.Info("Published inventory",
-			zap.String("subject", subject),
-			zap.String("os", inventory.OS.Name))
+		s.logger.Error("Failed to queue inventory publish", zap.Error(err))
+		return
 	}
+
+	s.logger.Info("Queued inventory publish",
+		zap.String("subject", subject),
+		zap.String("os", inventory.OS.Name))
 }

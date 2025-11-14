@@ -61,7 +61,7 @@ func NewClient(cfg *config.NATSConfig, logger *zap.Logger) (*Client, error) {
 		return nil, fmt.Errorf("invalid auth type: %s", cfg.Auth.Type)
 	}
 
-	// FIXED: Pass all URLs for automatic failover
+	// Pass all URLs for automatic failover
 	serverURLs := strings.Join(cfg.URLs, ",")
 	logger.Info("Connecting to NATS", zap.Strings("urls", cfg.URLs))
 	conn, err := nats.Connect(serverURLs, opts...)
@@ -88,43 +88,68 @@ func NewClient(cfg *config.NATSConfig, logger *zap.Logger) (*Client, error) {
 	}, nil
 }
 
-// PublishTelemetry publishes a message to JetStream with retries (fire-and-forget)
+// PublishTelemetry publishes a message to JetStream asynchronously (fire-and-forget)
 // This is used for heartbeats, metrics, service status, and inventory
+// Uses PublishAsync for better performance and built-in retry handling
 func (c *Client) PublishTelemetry(subject string, data []byte) error {
-	const maxRetries = 3
-	const retryDelay = time.Second
-
-	var lastErr error
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		_, err := c.js.Publish(subject, data)
-		if err == nil {
-			c.logger.Debug("Published telemetry",
-				zap.String("subject", subject),
-				zap.Int("bytes", len(data)),
-				zap.Int("attempt", attempt))
-			return nil
-		}
-
-		lastErr = err
-		c.logger.Warn("Failed to publish telemetry",
+	// PublishAsync returns a PubAckFuture immediately (non-blocking)
+	// The actual publish happens in the background with automatic retries
+	pubAckFuture, err := c.js.PublishAsync(subject, data)
+	if err != nil {
+		// This only fails if we can't queue the message (very rare)
+		c.logger.Error("Failed to queue telemetry publish",
 			zap.String("subject", subject),
-			zap.Error(err),
-			zap.Int("attempt", attempt),
-			zap.Int("max_retries", maxRetries))
-
-		// Don't sleep after last attempt
-		if attempt < maxRetries {
-			time.Sleep(retryDelay * time.Duration(attempt))
-		}
+			zap.Error(err))
+		return fmt.Errorf("failed to queue publish to %s: %w", subject, err)
 	}
 
-	// Log final failure after all retries
-	c.logger.Error("Failed to publish telemetry after all retries",
-		zap.String("subject", subject),
-		zap.Int("retries", maxRetries),
-		zap.Error(lastErr))
+	// Handle the acknowledgment asynchronously
+	// This doesn't block the caller - it runs in a goroutine managed by NATS
+	go func() {
+		select {
+		case <-pubAckFuture.Ok():
+			// Message was acknowledged by JetStream
+			c.logger.Debug("Published telemetry",
+				zap.String("subject", subject),
+				zap.Int("bytes", len(data)))
 
-	return fmt.Errorf("failed to publish to %s after %d attempts: %w", subject, maxRetries, lastErr)
+		case err := <-pubAckFuture.Err():
+			// Publication failed after retries
+			// Log but don't crash - telemetry is fire-and-forget
+			c.logger.Warn("Failed to publish telemetry after retries",
+				zap.String("subject", subject),
+				zap.Error(err))
+		}
+	}()
+
+	return nil
+}
+
+// PublishTelemetrySync is a synchronous version for cases where you need to know
+// if the publish succeeded (e.g., during shutdown or critical operations)
+func (c *Client) PublishTelemetrySync(subject string, data []byte, timeout time.Duration) error {
+	pubAckFuture, err := c.js.PublishAsync(subject, data)
+	if err != nil {
+		return fmt.Errorf("failed to queue publish to %s: %w", subject, err)
+	}
+
+	// Wait for acknowledgment with timeout
+	select {
+	case <-pubAckFuture.Ok():
+		c.logger.Debug("Published telemetry (sync)",
+			zap.String("subject", subject),
+			zap.Int("bytes", len(data)))
+		return nil
+
+	case err := <-pubAckFuture.Err():
+		c.logger.Error("Failed to publish telemetry (sync)",
+			zap.String("subject", subject),
+			zap.Error(err))
+		return fmt.Errorf("failed to publish to %s: %w", subject, err)
+
+	case <-time.After(timeout):
+		return fmt.Errorf("publish timeout after %v", timeout)
+	}
 }
 
 // Subscribe creates a subscription to the specified subject
