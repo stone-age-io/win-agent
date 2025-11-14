@@ -3,6 +3,7 @@ package scheduler
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/go-co-op/gocron/v2"
 	"go.uber.org/zap"
@@ -56,16 +57,41 @@ func New(
 func (s *Scheduler) scheduleTasks() error {
 	deviceID := s.config.DeviceID
 
-	// If metrics are enabled, do an initial baseline scrape (don't publish)
-	// This establishes counter baselines so the first real publish has valid data
+	// If metrics are enabled, establish baseline with retries
+	// This is critical for counter-based metrics (CPU, disk I/O)
 	if s.config.Tasks.SystemMetrics.Enabled {
-		s.logger.Info("Establishing metrics baseline (not publishing)")
-		_, err := s.executor.ScrapeMetrics(s.config.Tasks.SystemMetrics.ExporterURL)
-		if err != nil {
-			s.logger.Warn("Failed to establish metrics baseline", zap.Error(err))
-			// Continue anyway - first publish will just skip rate-based metrics
-		} else {
-			s.logger.Info("Metrics baseline established")
+		s.logger.Info("Establishing metrics baseline")
+
+		const maxRetries = 3
+		const retryDelay = 2 * time.Second
+
+		var baselineErr error
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			_, err := s.executor.ScrapeMetrics(s.config.Tasks.SystemMetrics.ExporterURL)
+			if err == nil {
+				s.logger.Info("Metrics baseline established successfully")
+				baselineErr = nil
+				break
+			}
+
+			baselineErr = err
+			s.logger.Warn("Failed to establish metrics baseline",
+				zap.Error(err),
+				zap.Int("attempt", attempt),
+				zap.Int("max_retries", maxRetries))
+
+			// Don't sleep after last attempt
+			if attempt < maxRetries {
+				time.Sleep(retryDelay)
+			}
+		}
+
+		// Warn if baseline failed after all retries
+		if baselineErr != nil {
+			s.logger.Warn("Could not establish metrics baseline after retries",
+				zap.Error(baselineErr),
+				zap.String("impact", "First metrics publish will be incomplete (no CPU or disk I/O rates)"))
+			// Continue anyway - subsequent scrapes will establish the baseline
 		}
 	}
 
@@ -176,7 +202,7 @@ func (s *Scheduler) publishMetrics(deviceID string) {
 	if err != nil {
 		s.logger.Error("Failed to scrape metrics", zap.Error(err))
 
-		// Publish error message
+		// Publish error message so control plane knows scraping failed
 		errorMsg := tasks.CreateMetricsError(err)
 		data, _ := json.Marshal(errorMsg)
 		if err := s.nats.PublishTelemetry(subject, data); err != nil {

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/spf13/viper"
@@ -9,25 +10,25 @@ import (
 
 // Config represents the complete agent configuration
 type Config struct {
-	DeviceID string      `mapstructure:"device_id"`
-	NATS     NATSConfig  `mapstructure:"nats"`
-	Tasks    TasksConfig `mapstructure:"tasks"`
+	DeviceID string         `mapstructure:"device_id"`
+	NATS     NATSConfig     `mapstructure:"nats"`
+	Tasks    TasksConfig    `mapstructure:"tasks"`
 	Commands CommandsConfig `mapstructure:"commands"`
 	Logging  LoggingConfig  `mapstructure:"logging"`
 }
 
 // NATSConfig holds NATS connection settings
 type NATSConfig struct {
-	URLs           []string      `mapstructure:"urls"`
-	Auth           AuthConfig    `mapstructure:"auth"`
-	MaxReconnects  int           `mapstructure:"max_reconnects"`
-	ReconnectWait  time.Duration `mapstructure:"reconnect_wait"`
-	DrainTimeout   time.Duration `mapstructure:"drain_timeout"`
+	URLs          []string      `mapstructure:"urls"`
+	Auth          AuthConfig    `mapstructure:"auth"`
+	MaxReconnects int           `mapstructure:"max_reconnects"`
+	ReconnectWait time.Duration `mapstructure:"reconnect_wait"`
+	DrainTimeout  time.Duration `mapstructure:"drain_timeout"`
 }
 
 // AuthConfig holds NATS authentication credentials
 type AuthConfig struct {
-	Type      string `mapstructure:"type"`       // creds, token, userpass
+	Type      string `mapstructure:"type"`       // creds, token, userpass, none
 	CredsFile string `mapstructure:"creds_file"` // for creds auth
 	Token     string `mapstructure:"token"`      // for token auth
 	Username  string `mapstructure:"username"`   // for userpass auth
@@ -50,9 +51,9 @@ type HeartbeatConfig struct {
 
 // SystemMetricsConfig configures metrics scraping
 type SystemMetricsConfig struct {
-	Enabled      bool          `mapstructure:"enabled"`
-	Interval     time.Duration `mapstructure:"interval"`
-	ExporterURL  string        `mapstructure:"exporter_url"`
+	Enabled     bool          `mapstructure:"enabled"`
+	Interval    time.Duration `mapstructure:"interval"`
+	ExporterURL string        `mapstructure:"exporter_url"`
 }
 
 // ServiceCheckConfig configures service status monitoring
@@ -70,9 +71,10 @@ type InventoryConfig struct {
 
 // CommandsConfig holds command execution settings
 type CommandsConfig struct {
-	AllowedServices  []string `mapstructure:"allowed_services"`
-	AllowedCommands  []string `mapstructure:"allowed_commands"`
-	AllowedLogPaths  []string `mapstructure:"allowed_log_paths"`
+	AllowedServices []string      `mapstructure:"allowed_services"`
+	AllowedCommands []string      `mapstructure:"allowed_commands"`
+	AllowedLogPaths []string      `mapstructure:"allowed_log_paths"`
+	Timeout         time.Duration `mapstructure:"timeout"` // Command execution timeout
 }
 
 // LoggingConfig holds logging settings
@@ -86,29 +88,29 @@ type LoggingConfig struct {
 // Load reads and parses the configuration file
 func Load(configPath string) (*Config, error) {
 	v := viper.New()
-	
+
 	// Set config file path
 	v.SetConfigFile(configPath)
-	
+
 	// Set defaults
 	setDefaults(v)
-	
+
 	// Read config file
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("failed to read config: %w", err)
 	}
-	
+
 	// Unmarshal into struct
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
-	
+
 	// Validate configuration
 	if err := validate(&cfg); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
-	
+
 	return &cfg, nil
 }
 
@@ -118,7 +120,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("nats.max_reconnects", -1) // infinite
 	v.SetDefault("nats.reconnect_wait", "2s")
 	v.SetDefault("nats.drain_timeout", "30s")
-	
+
 	// Task defaults
 	v.SetDefault("tasks.heartbeat.enabled", true)
 	v.SetDefault("tasks.heartbeat.interval", "1m")
@@ -129,7 +131,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("tasks.service_check.interval", "1m")
 	v.SetDefault("tasks.inventory.enabled", true)
 	v.SetDefault("tasks.inventory.interval", "24h")
-	
+
+	// Command defaults
+	v.SetDefault("commands.timeout", "30s")
+
 	// Logging defaults
 	v.SetDefault("logging.level", "info")
 	v.SetDefault("logging.file", "C:\\ProgramData\\WinAgent\\agent.log")
@@ -139,16 +144,23 @@ func setDefaults(v *viper.Viper) {
 
 // validate checks that required fields are present and valid
 func validate(cfg *Config) error {
-	// Validate device_id
+	// Validate device_id is present
 	if cfg.DeviceID == "" {
 		return fmt.Errorf("device_id is required")
 	}
-	
+
+	// Validate device_id format (alphanumeric, dash, underscore only)
+	// This ensures compatibility with NATS subject names
+	validDeviceID := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+	if !validDeviceID.MatchString(cfg.DeviceID) {
+		return fmt.Errorf("device_id must contain only alphanumeric characters, dashes, and underscores (got: %s)", cfg.DeviceID)
+	}
+
 	// Validate NATS URLs
 	if len(cfg.NATS.URLs) == 0 {
 		return fmt.Errorf("at least one NATS URL is required")
 	}
-	
+
 	// Validate NATS auth
 	switch cfg.NATS.Auth.Type {
 	case "creds":
@@ -168,12 +180,37 @@ func validate(cfg *Config) error {
 	default:
 		return fmt.Errorf("invalid auth type: %s (must be creds, token, userpass, or none)", cfg.NATS.Auth.Type)
 	}
-	
+
 	// Validate service check has services if enabled
 	if cfg.Tasks.ServiceCheck.Enabled && len(cfg.Tasks.ServiceCheck.Services) == 0 {
 		return fmt.Errorf("at least one service must be specified when service_check is enabled")
 	}
-	
+
+	// Validate task intervals are sensible
+	if cfg.Tasks.Heartbeat.Enabled && cfg.Tasks.Heartbeat.Interval < 10*time.Second {
+		return fmt.Errorf("heartbeat interval must be at least 10 seconds (got: %v)", cfg.Tasks.Heartbeat.Interval)
+	}
+
+	if cfg.Tasks.SystemMetrics.Enabled && cfg.Tasks.SystemMetrics.Interval < 30*time.Second {
+		return fmt.Errorf("system_metrics interval must be at least 30 seconds (got: %v)", cfg.Tasks.SystemMetrics.Interval)
+	}
+
+	// Validate heartbeat is more frequent than metrics (best practice)
+	if cfg.Tasks.Heartbeat.Enabled && cfg.Tasks.SystemMetrics.Enabled {
+		if cfg.Tasks.Heartbeat.Interval > cfg.Tasks.SystemMetrics.Interval {
+			return fmt.Errorf("heartbeat interval (%v) should not exceed metrics interval (%v)",
+				cfg.Tasks.Heartbeat.Interval, cfg.Tasks.SystemMetrics.Interval)
+		}
+	}
+
+	// Validate command timeout
+	if cfg.Commands.Timeout < 5*time.Second {
+		return fmt.Errorf("command timeout must be at least 5 seconds (got: %v)", cfg.Commands.Timeout)
+	}
+	if cfg.Commands.Timeout > 5*time.Minute {
+		return fmt.Errorf("command timeout must not exceed 5 minutes (got: %v)", cfg.Commands.Timeout)
+	}
+
 	// Validate log level
 	validLevels := map[string]bool{
 		"debug": true,
@@ -184,6 +221,14 @@ func validate(cfg *Config) error {
 	if !validLevels[cfg.Logging.Level] {
 		return fmt.Errorf("invalid log level: %s (must be debug, info, warn, or error)", cfg.Logging.Level)
 	}
-	
+
+	// Validate log rotation settings
+	if cfg.Logging.MaxSizeMB < 1 || cfg.Logging.MaxSizeMB > 1000 {
+		return fmt.Errorf("log max_size_mb must be between 1 and 1000 (got: %d)", cfg.Logging.MaxSizeMB)
+	}
+	if cfg.Logging.MaxBackups < 0 || cfg.Logging.MaxBackups > 100 {
+		return fmt.Errorf("log max_backups must be between 0 and 100 (got: %d)", cfg.Logging.MaxBackups)
+	}
+
 	return nil
 }

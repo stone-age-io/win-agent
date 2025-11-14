@@ -10,6 +10,7 @@ import (
 
 	"go.uber.org/zap"
 	"golang.org/x/sys/windows/registry"
+	"win-agent/internal/utils"
 )
 
 // Inventory represents complete system inventory information
@@ -183,14 +184,9 @@ func getMemoryInfo() (MemoryInfo, error) {
 	}
 
 	return MemoryInfo{
-		TotalGB:     round(float64(memStatus.ullTotalPhys) / 1024 / 1024 / 1024),
-		AvailableGB: round(float64(memStatus.ullAvailPhys) / 1024 / 1024 / 1024),
+		TotalGB:     utils.Round(float64(memStatus.ullTotalPhys) / 1024 / 1024 / 1024),
+		AvailableGB: utils.Round(float64(memStatus.ullAvailPhys) / 1024 / 1024 / 1024),
 	}, nil
-}
-
-// round rounds a float to 2 decimal places
-func round(val float64) float64 {
-	return float64(int(val*100+0.5)) / 100
 }
 
 // getDiskInfo retrieves disk information for all fixed drives
@@ -217,8 +213,8 @@ func getDiskInfo() ([]DiskInfo, error) {
 		if ret != 0 && totalBytes > 0 {
 			disks = append(disks, DiskInfo{
 				Drive:   fmt.Sprintf("%c:", drive),
-				TotalGB: round(float64(totalBytes) / 1024 / 1024 / 1024),
-				FreeGB:  round(float64(freeBytesAvailable) / 1024 / 1024 / 1024),
+				TotalGB: utils.Round(float64(totalBytes) / 1024 / 1024 / 1024),
+				FreeGB:  utils.Round(float64(freeBytesAvailable) / 1024 / 1024 / 1024),
 			})
 		}
 	}

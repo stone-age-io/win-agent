@@ -12,6 +12,7 @@ import (
 	"win-agent/internal/tasks"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 // Agent represents the main agent
@@ -120,7 +121,7 @@ func (a *Agent) Shutdown() error {
 	return nil
 }
 
-// initLogger creates and configures the logger
+// initLogger creates and configures the logger with log rotation
 func initLogger(cfg config.LoggingConfig) (*zap.Logger, error) {
 	// Parse log level
 	var level zapcore.Level
@@ -133,21 +134,24 @@ func initLogger(cfg config.LoggingConfig) (*zap.Logger, error) {
 	encoderConfig.TimeKey = "timestamp"
 	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 
-	// Create core for file logging
+	// Create encoder for JSON logging
 	fileEncoder := zapcore.NewJSONEncoder(encoderConfig)
 
-	// Open log file
-	logFile, err := os.OpenFile(cfg.File, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open log file: %w", err)
+	// Setup log rotation with lumberjack
+	fileWriter := &lumberjack.Logger{
+		Filename:   cfg.File,
+		MaxSize:    cfg.MaxSizeMB,  // megabytes
+		MaxBackups: cfg.MaxBackups,
+		MaxAge:     28, // days
+		Compress:   true,
 	}
 
-	// Create console encoder for stdout (during development)
+	// Create console encoder for stdout (during development/debugging)
 	consoleEncoder := zapcore.NewConsoleEncoder(encoderConfig)
 
-	// Create multi-writer core (file + console)
+	// Create multi-writer core (file with rotation + console)
 	core := zapcore.NewTee(
-		zapcore.NewCore(fileEncoder, zapcore.AddSync(logFile), level),
+		zapcore.NewCore(fileEncoder, zapcore.AddSync(fileWriter), level),
 		zapcore.NewCore(consoleEncoder, zapcore.AddSync(os.Stdout), level),
 	)
 

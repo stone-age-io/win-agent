@@ -86,22 +86,43 @@ func NewClient(cfg *config.NATSConfig, logger *zap.Logger) (*Client, error) {
 	}, nil
 }
 
-// PublishTelemetry publishes a message to JetStream (fire-and-forget)
+// PublishTelemetry publishes a message to JetStream with retries (fire-and-forget)
 // This is used for heartbeats, metrics, service status, and inventory
 func (c *Client) PublishTelemetry(subject string, data []byte) error {
-	_, err := c.js.Publish(subject, data)
-	if err != nil {
-		c.logger.Error("Failed to publish telemetry",
+	const maxRetries = 3
+	const retryDelay = time.Second
+
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		_, err := c.js.Publish(subject, data)
+		if err == nil {
+			c.logger.Debug("Published telemetry",
+				zap.String("subject", subject),
+				zap.Int("bytes", len(data)),
+				zap.Int("attempt", attempt))
+			return nil
+		}
+
+		lastErr = err
+		c.logger.Warn("Failed to publish telemetry",
 			zap.String("subject", subject),
-			zap.Error(err))
-		return fmt.Errorf("failed to publish to %s: %w", subject, err)
+			zap.Error(err),
+			zap.Int("attempt", attempt),
+			zap.Int("max_retries", maxRetries))
+
+		// Don't sleep after last attempt
+		if attempt < maxRetries {
+			time.Sleep(retryDelay * time.Duration(attempt))
+		}
 	}
 
-	c.logger.Debug("Published telemetry",
+	// Log final failure after all retries
+	c.logger.Error("Failed to publish telemetry after all retries",
 		zap.String("subject", subject),
-		zap.Int("bytes", len(data)))
+		zap.Int("retries", maxRetries),
+		zap.Error(lastErr))
 
-	return nil
+	return fmt.Errorf("failed to publish to %s after %d attempts: %w", subject, maxRetries, lastErr)
 }
 
 // Subscribe creates a subscription to the specified subject
@@ -124,22 +145,30 @@ func (c *Client) Subscribe(subject string, handler nats.MsgHandler) (*nats.Subsc
 func (c *Client) Drain(timeout time.Duration) error {
 	c.logger.Info("Draining NATS connection", zap.Duration("timeout", timeout))
 
-	// Create a channel to signal when drain is complete
-	drainDone := make(chan struct{})
+	// Check if connection is already closed
+	if !c.conn.IsConnected() && c.conn.IsClosed() {
+		c.logger.Info("Connection already closed")
+		return nil
+	}
+
+	// Create a channel to receive drain completion or error
+	drainDone := make(chan error, 1)
 
 	// Start drain in goroutine
 	go func() {
-		if err := c.conn.Drain(); err != nil {
-			c.logger.Error("Error during NATS drain", zap.Error(err))
-		}
-		close(drainDone)
+		drainDone <- c.conn.Drain()
 	}()
 
 	// Wait for drain to complete or timeout
 	select {
-	case <-drainDone:
+	case err := <-drainDone:
+		if err != nil {
+			c.logger.Error("Error during NATS drain", zap.Error(err))
+			return err
+		}
 		c.logger.Info("NATS drain completed successfully")
 		return nil
+
 	case <-time.After(timeout):
 		c.logger.Warn("NATS drain timeout, forcing close")
 		c.conn.Close()

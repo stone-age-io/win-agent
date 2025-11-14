@@ -9,6 +9,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"go.uber.org/zap"
+	"win-agent/internal/utils"
 )
 
 // SystemMetrics represents system metrics collected from windows_exporter
@@ -19,11 +20,6 @@ type SystemMetrics struct {
 	DiskReadBytesPerSec  float64 `json:"disk_read_bytes_per_sec"`
 	DiskWriteBytesPerSec float64 `json:"disk_write_bytes_per_sec"`
 	Timestamp            string  `json:"timestamp"`
-}
-
-// round rounds a float to 2 decimal places (grug brain: nobody needs 15 decimals for CPU%)
-func round(val float64) float64 {
-	return float64(int(val*100+0.5)) / 100
 }
 
 // metricsCache stores previous counter values for rate calculation
@@ -125,7 +121,7 @@ func parsePrometheusMetrics(reader io.Reader, logger *zap.Logger) (*SystemMetric
 			if totalDelta > 0 {
 				// Usage = time spent NOT idle / total time
 				idlePercent := (idleDelta / totalDelta) * 100
-				metrics.CPUUsagePercent = round(100 - idlePercent)
+				metrics.CPUUsagePercent = utils.Round(100 - idlePercent)
 				cpuFound = true
 				
 				logger.Debug("CPU calculated",
@@ -153,7 +149,7 @@ func parsePrometheusMetrics(reader io.Reader, logger *zap.Logger) (*SystemMetric
 	if family, ok := metricFamilies["windows_memory_available_bytes"]; ok {
 		if len(family.Metric) > 0 && family.Metric[0].Gauge != nil {
 			bytes := family.Metric[0].Gauge.GetValue()
-			metrics.MemoryFreeGB = round(bytes / 1024 / 1024 / 1024)
+			metrics.MemoryFreeGB = utils.Round(bytes / 1024 / 1024 / 1024)
 			memoryFound = true
 		}
 	}
@@ -163,8 +159,9 @@ func parsePrometheusMetrics(reader io.Reader, logger *zap.Logger) (*SystemMetric
 		if family, ok := metricFamilies["windows_memory_physical_free_bytes"]; ok {
 			if len(family.Metric) > 0 && family.Metric[0].Gauge != nil {
 				bytes := family.Metric[0].Gauge.GetValue()
-				metrics.MemoryFreeGB = round(bytes / 1024 / 1024 / 1024)
+				metrics.MemoryFreeGB = utils.Round(bytes / 1024 / 1024 / 1024)
 				memoryFound = true
+				logger.Debug("Using physical_free_bytes fallback for memory metric")
 			}
 		}
 	}
@@ -196,7 +193,7 @@ func parsePrometheusMetrics(reader io.Reader, logger *zap.Logger) (*SystemMetric
 		}
 
 		if foundFree && foundTotal && totalBytes > 0 {
-			metrics.DiskFreePercent = round((freeBytes / totalBytes) * 100)
+			metrics.DiskFreePercent = utils.Round((freeBytes / totalBytes) * 100)
 		}
 	}
 
@@ -216,7 +213,7 @@ func parsePrometheusMetrics(reader io.Reader, logger *zap.Logger) (*SystemMetric
 						currentRead := m.Counter.GetValue()
 						if cache.lastDiskReadBytes > 0 {
 							delta := currentRead - cache.lastDiskReadBytes
-							metrics.DiskReadBytesPerSec = round(delta / timeDelta)
+							metrics.DiskReadBytesPerSec = utils.Round(delta / timeDelta)
 						}
 						cache.lastDiskReadBytes = currentRead
 						break
@@ -232,7 +229,7 @@ func parsePrometheusMetrics(reader io.Reader, logger *zap.Logger) (*SystemMetric
 						currentWrite := m.Counter.GetValue()
 						if cache.lastDiskWriteBytes > 0 {
 							delta := currentWrite - cache.lastDiskWriteBytes
-							metrics.DiskWriteBytesPerSec = round(delta / timeDelta)
+							metrics.DiskWriteBytesPerSec = utils.Round(delta / timeDelta)
 						}
 						cache.lastDiskWriteBytes = currentWrite
 						break
