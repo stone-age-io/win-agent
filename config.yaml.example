@@ -1,0 +1,80 @@
+# Windows Agent Configuration Example
+
+# Agent Identity
+device_id: "device-12345"  # Unique identifier for this agent
+
+# NATS Connection
+nats:
+  urls: 
+    - "nats://connect.your-service.com:4222"
+  
+  # Authentication (choose one method)
+  auth:
+    # Option 1: Credentials file (RECOMMENDED for production)
+    type: "creds"
+    creds_file: "C:\\ProgramData\\WinAgent\\device.creds"
+    
+    # Option 2: Token authentication
+    # type: "token"
+    # token: "your-token-here"
+    
+    # Option 3: Username/Password authentication
+    # type: "userpass"
+    # username: "user"
+    # password: "pass"
+  
+  # Optional: Custom connection options
+  max_reconnects: -1  # -1 = infinite retries
+  reconnect_wait: "2s"
+  drain_timeout: "30s"
+
+# Scheduled Tasks
+tasks:
+  # Heartbeat - Periodic "I'm alive" message
+  heartbeat:
+    enabled: true
+    interval: "1m"  # Every 1 minute
+  
+  # System Metrics - Scrape windows_exporter
+  system_metrics:
+    enabled: true
+    interval: "5m"  # Every 5 minutes
+    exporter_url: "http://localhost:9182/metrics"
+  
+  # Service Check - Monitor Windows services
+  service_check:
+    enabled: true
+    interval: "1m"  # Every 1 minute
+    services:  # List of services to monitor
+      - "YourCriticalService"
+      - "AnotherImportantService"
+  
+  # Inventory - System hardware/software inventory
+  inventory:
+    enabled: true
+    interval: "24h"  # Daily (also runs on startup)
+
+# Command Execution
+commands:
+  # Whitelist of services that can be controlled
+  allowed_services:
+    - "YourCriticalService"
+    - "AnotherImportantService"
+  
+  # Whitelist of allowed PowerShell commands (exact match only)
+  allowed_commands:
+    - "Get-Process | Sort-Object CPU -Descending | Select-Object -First 5"
+    - "Get-NetIPAddress"
+    - "Get-EventLog -LogName Application -Newest 10"
+  
+  # Allowed log file paths (glob patterns supported)
+  allowed_log_paths:
+    - "C:\\Logs\\*.log"
+    - "C:\\ProgramData\\YourApp\\*.log"
+
+# Logging
+logging:
+  level: "info"  # debug, info, warn, error
+  file: "C:\\ProgramData\\WinAgent\\agent.log"
+  max_size_mb: 100
+  max_backups: 3
