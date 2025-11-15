@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"win-agent/internal/utils"
 )
 
 // Executor handles all task execution for both scheduled tasks and commands
@@ -69,7 +70,10 @@ func (e *Executor) GetAgentMetrics() *AgentMetrics {
 	defer e.stats.mu.RUnlock()
 
 	metrics := &AgentMetrics{
-		MemoryUsageMB:     float64(mem.Alloc) / 1024 / 1024,
+		// Use mem.Sys for total OS memory (matches Task Manager)
+		// This includes heap, stack, runtime overhead - the full process footprint
+		// Rounded to 2 decimal places for consistency with other metrics
+		MemoryUsageMB:     utils.Round(float64(mem.Sys) / 1024 / 1024),
 		Goroutines:        runtime.NumGoroutine(),
 		UptimeSeconds:     int64(time.Since(e.stats.startTime).Seconds()),
 		CommandsProcessed: e.stats.commandsProcessed,
