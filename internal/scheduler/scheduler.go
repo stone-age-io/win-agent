@@ -215,7 +215,11 @@ func (s *Scheduler) publishHeartbeat(deviceID string) {
 	if err := s.nats.PublishTelemetry(subject, data); err != nil {
 		// This only fails if we can't queue (extremely rare)
 		s.logger.Error("Failed to queue heartbeat publish", zap.Error(err))
+		return
 	}
+
+	// Record successful execution
+	s.executor.RecordHeartbeat()
 
 	// Success logging happens in the async callback - no need here
 }
@@ -227,6 +231,9 @@ func (s *Scheduler) publishMetrics(deviceID string) {
 	metrics, err := s.executor.ScrapeMetrics(s.config.Tasks.SystemMetrics.ExporterURL)
 	if err != nil {
 		s.logger.Error("Failed to scrape metrics", zap.Error(err))
+
+		// Record failure
+		s.executor.RecordMetricsFailure()
 
 		// Publish error message so control plane knows scraping failed
 		errorMsg := tasks.CreateMetricsError(err)
@@ -250,6 +257,9 @@ func (s *Scheduler) publishMetrics(deviceID string) {
 		s.logger.Error("Failed to queue metrics publish", zap.Error(err))
 		return
 	}
+
+	// Record successful execution
+	s.executor.RecordMetricsSuccess()
 
 	// Log success immediately (the actual publish happens in background)
 	s.logger.Info("Queued metrics publish",
@@ -298,6 +308,9 @@ func (s *Scheduler) publishServiceStatus(deviceID string) {
 		return
 	}
 
+	// Record successful execution
+	s.executor.RecordServiceCheck()
+
 	s.logger.Debug("Queued service status publish",
 		zap.String("subject", subject),
 		zap.Int("count", len(statuses)))
@@ -323,6 +336,9 @@ func (s *Scheduler) publishInventory(deviceID string) {
 		s.logger.Error("Failed to queue inventory publish", zap.Error(err))
 		return
 	}
+
+	// Record successful execution
+	s.executor.RecordInventory()
 
 	s.logger.Info("Queued inventory publish",
 		zap.String("subject", subject),

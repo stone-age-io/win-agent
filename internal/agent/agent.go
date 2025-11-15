@@ -53,8 +53,8 @@ func New(configPath string, version string) (*Agent, error) {
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
 
-	// Create command handlers
-	handlers := natsclient.NewCommandHandlers(logger, cfg, executor)
+	// Create command handlers (now with NATS client for health checks and version)
+	handlers := natsclient.NewCommandHandlers(logger, cfg, executor, natsClient, version)
 
 	// Subscribe to commands
 	logger.Info("Subscribing to commands...")

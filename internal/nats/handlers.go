@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -14,21 +15,25 @@ import (
 
 // CommandHandlers manages all command subscriptions and handlers
 type CommandHandlers struct {
-	logger       *zap.Logger
-	config       *config.Config
-	deviceID     string
+	logger        *zap.Logger
+	config        *config.Config
+	deviceID      string
 	subjectPrefix string
-	taskExecutor *tasks.Executor
+	version       string
+	taskExecutor  *tasks.Executor
+	natsClient    *Client
 }
 
 // NewCommandHandlers creates a new command handler manager
-func NewCommandHandlers(logger *zap.Logger, cfg *config.Config, executor *tasks.Executor) *CommandHandlers {
+func NewCommandHandlers(logger *zap.Logger, cfg *config.Config, executor *tasks.Executor, natsClient *Client, version string) *CommandHandlers {
 	return &CommandHandlers{
 		logger:        logger,
 		config:        cfg,
 		deviceID:      cfg.DeviceID,
 		subjectPrefix: cfg.SubjectPrefix,
+		version:       version,
 		taskExecutor:  executor,
+		natsClient:    natsClient,
 	}
 }
 
@@ -146,18 +151,40 @@ type customExecRequest struct {
 }
 
 type customExecResponse struct {
-	Status    string `json:"status"`
-	Command   string `json:"command,omitempty"`
-	Output    string `json:"output,omitempty"`
-	ExitCode  int    `json:"exit_code,omitempty"`
-	Error     string `json:"error,omitempty"`
-	Timestamp string `json:"timestamp"`
+	Status    string          `json:"status"`
+	Command   string          `json:"command,omitempty"`
+	Output    json.RawMessage `json:"output,omitempty"`  // Changed to RawMessage for JSON support
+	ExitCode  int             `json:"exit_code,omitempty"`
+	Error     string          `json:"error,omitempty"`
+	Timestamp string          `json:"timestamp"`
 }
 
+// Enhanced health response structures
 type healthResponse struct {
-	Status      string                 `json:"status"`
-	AgentMetrics *tasks.AgentMetrics   `json:"agent_metrics"`
-	Timestamp   string                 `json:"timestamp"`
+	Status    string              `json:"status"` // "healthy", "degraded", "unhealthy"
+	Timestamp string              `json:"timestamp"`
+	Agent     *tasks.AgentMetrics `json:"agent"`
+	NATS      *NATSHealth         `json:"nats"`
+	Tasks     *tasks.TaskHealthMetrics `json:"tasks"`
+	Config    *ConfigInfo         `json:"config"`
+}
+
+type NATSHealth struct {
+	Connected  bool   `json:"connected"`
+	ServerURL  string `json:"server_url,omitempty"`
+	ServerID   string `json:"server_id,omitempty"`
+	Reconnects uint64 `json:"reconnects"`
+	InMsgs     uint64 `json:"in_msgs"`
+	OutMsgs    uint64 `json:"out_msgs"`
+	InBytes    uint64 `json:"in_bytes"`
+	OutBytes   uint64 `json:"out_bytes"`
+}
+
+type ConfigInfo struct {
+	DeviceID      string   `json:"device_id"`
+	SubjectPrefix string   `json:"subject_prefix"`
+	Version       string   `json:"version"`
+	EnabledTasks  []string `json:"enabled_tasks"`
 }
 
 type errorResponse struct {
@@ -332,11 +359,35 @@ func (h *CommandHandlers) handleCustomExec(msg *nats.Msg) {
 
 	h.taskExecutor.RecordCommandSuccess()
 
+	// Prepare output for response
+	// If output is valid JSON, include it as parsed JSON
+	// If not, include it as a JSON-encoded string
+	var outputData json.RawMessage
+	trimmedOutput := strings.TrimSpace(output)
+	
+	// Check if output looks like JSON (starts with { or [)
+	if len(trimmedOutput) > 0 && (trimmedOutput[0] == '{' || trimmedOutput[0] == '[') {
+		// Try to parse as JSON to validate
+		var testJSON interface{}
+		if err := json.Unmarshal([]byte(trimmedOutput), &testJSON); err == nil {
+			// Valid JSON - include as-is (will be parsed object in response)
+			outputData = json.RawMessage(trimmedOutput)
+		} else {
+			// Not valid JSON - encode as string
+			jsonStr, _ := json.Marshal(output)
+			outputData = json.RawMessage(jsonStr)
+		}
+	} else {
+		// Plain text output - encode as string
+		jsonStr, _ := json.Marshal(output)
+		outputData = json.RawMessage(jsonStr)
+	}
+
 	// Success response
 	response := customExecResponse{
 		Status:    "success",
 		Command:   req.Command,
-		Output:    output,
+		Output:    outputData,
 		ExitCode:  exitCode,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}
@@ -349,25 +400,113 @@ func (h *CommandHandlers) handleCustomExec(msg *nats.Msg) {
 		zap.Int("exit_code", exitCode))
 }
 
-// handleHealth returns agent health and performance metrics
+// handleHealth returns enhanced agent health information
 func (h *CommandHandlers) handleHealth(msg *nats.Msg) {
 	h.logger.Debug("Received health check command")
 
 	// Get agent metrics
-	metrics := h.taskExecutor.GetAgentMetrics()
+	agentMetrics := h.taskExecutor.GetAgentMetrics()
+
+	// Get task metrics
+	taskMetrics := h.taskExecutor.GetTaskMetrics()
+
+	// Get NATS connection health
+	natsHealth := h.getNATSHealth()
+
+	// Get config info
+	configInfo := h.getConfigInfo()
+
+	// Determine overall health status
+	status := h.determineHealthStatus(natsHealth, taskMetrics)
 
 	response := healthResponse{
-		Status:       "healthy",
-		AgentMetrics: metrics,
-		Timestamp:    time.Now().UTC().Format(time.RFC3339),
+		Status:    status,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Agent:     agentMetrics,
+		NATS:      natsHealth,
+		Tasks:     taskMetrics,
+		Config:    configInfo,
 	}
 
 	responseBytes, _ := json.Marshal(response)
 	msg.Respond(responseBytes)
 
 	h.logger.Debug("Sent health response",
-		zap.Float64("memory_mb", metrics.MemoryUsageMB),
-		zap.Int("goroutines", metrics.Goroutines))
+		zap.String("status", status),
+		zap.Float64("memory_mb", agentMetrics.MemoryUsageMB),
+		zap.Int("goroutines", agentMetrics.Goroutines))
+}
+
+// getNATSHealth collects NATS connection health information
+func (h *CommandHandlers) getNATSHealth() *NATSHealth {
+	stats := h.natsClient.Stats()
+	
+	health := &NATSHealth{
+		Connected:  h.natsClient.IsConnected(),
+		Reconnects: uint64(stats.Reconnects),
+		InMsgs:     stats.InMsgs,
+		OutMsgs:    stats.OutMsgs,
+		InBytes:    stats.InBytes,
+		OutBytes:   stats.OutBytes,
+	}
+
+	// Add server info if connected
+	if health.Connected {
+		health.ServerURL = h.natsClient.conn.ConnectedUrl()
+		health.ServerID = h.natsClient.conn.ConnectedServerId()
+	}
+
+	return health
+}
+
+// getConfigInfo returns configuration summary
+func (h *CommandHandlers) getConfigInfo() *ConfigInfo {
+	enabledTasks := []string{}
+	
+	if h.config.Tasks.Heartbeat.Enabled {
+		enabledTasks = append(enabledTasks, "heartbeat")
+	}
+	if h.config.Tasks.SystemMetrics.Enabled {
+		enabledTasks = append(enabledTasks, "system_metrics")
+	}
+	if h.config.Tasks.ServiceCheck.Enabled {
+		enabledTasks = append(enabledTasks, "service_check")
+	}
+	if h.config.Tasks.Inventory.Enabled {
+		enabledTasks = append(enabledTasks, "inventory")
+	}
+
+	return &ConfigInfo{
+		DeviceID:      h.deviceID,
+		SubjectPrefix: h.subjectPrefix,
+		Version:       h.version,
+		EnabledTasks:  enabledTasks,
+	}
+}
+
+// determineHealthStatus calculates overall health status
+func (h *CommandHandlers) determineHealthStatus(natsHealth *NATSHealth, taskMetrics *tasks.TaskHealthMetrics) string {
+	// UNHEALTHY: NATS disconnected
+	if !natsHealth.Connected {
+		return "unhealthy"
+	}
+
+	// DEGRADED: High reconnect count (connection unstable)
+	if natsHealth.Reconnects > 10 {
+		return "degraded"
+	}
+
+	// DEGRADED: High metrics failure rate (>50% failures)
+	// Only check if we have enough samples to be meaningful
+	if taskMetrics.MetricsCount > 0 {
+		failureRate := float64(taskMetrics.MetricsFailures) / float64(taskMetrics.MetricsCount)
+		if failureRate > 0.5 {
+			return "degraded"
+		}
+	}
+
+	// HEALTHY: NATS connected and stable
+	return "healthy"
 }
 
 // respondError sends a generic error response

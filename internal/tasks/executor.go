@@ -15,6 +15,7 @@ type Executor struct {
 	commandTimeout time.Duration
 	stats          *ExecutorStats
 	metricsCache   *metricsCache // Moved from global variable in metrics.go
+	taskStats      *TaskStats
 }
 
 // ExecutorStats tracks executor statistics for self-monitoring
@@ -25,6 +26,24 @@ type ExecutorStats struct {
 	commandsErrored   int64
 	lastError         string
 	lastErrorTime     time.Time
+}
+
+// TaskStats tracks scheduled task execution for monitoring
+type TaskStats struct {
+	mu sync.RWMutex
+	
+	// Execution timestamps
+	lastHeartbeat    time.Time
+	lastMetrics      time.Time
+	lastServiceCheck time.Time
+	lastInventory    time.Time
+	
+	// Execution counters
+	heartbeatCount    int64
+	metricsCount      int64
+	metricsFailures   int64
+	serviceCheckCount int64
+	inventoryCount    int64
 }
 
 // metricsCache stores previous counter values for rate calculation
@@ -49,6 +68,20 @@ type AgentMetrics struct {
 	LastErrorTime     string  `json:"last_error_time,omitempty"`
 }
 
+// TaskHealthMetrics represents scheduled task health
+type TaskHealthMetrics struct {
+	LastHeartbeat    string `json:"last_heartbeat,omitempty"`
+	LastMetrics      string `json:"last_metrics,omitempty"`
+	LastServiceCheck string `json:"last_service_check,omitempty"`
+	LastInventory    string `json:"last_inventory,omitempty"`
+	
+	HeartbeatCount    int64 `json:"heartbeat_count"`
+	MetricsCount      int64 `json:"metrics_count"`
+	MetricsFailures   int64 `json:"metrics_failures"`
+	ServiceCheckCount int64 `json:"service_check_count"`
+	InventoryCount    int64 `json:"inventory_count"`
+}
+
 // NewExecutor creates a new task executor
 func NewExecutor(logger *zap.Logger, commandTimeout time.Duration) *Executor {
 	return &Executor{
@@ -58,6 +91,7 @@ func NewExecutor(logger *zap.Logger, commandTimeout time.Duration) *Executor {
 			startTime: time.Now(),
 		},
 		metricsCache: &metricsCache{},
+		taskStats:    &TaskStats{},
 	}
 }
 
@@ -86,6 +120,75 @@ func (e *Executor) GetAgentMetrics() *AgentMetrics {
 	}
 
 	return metrics
+}
+
+// GetTaskMetrics returns scheduled task execution metrics
+func (e *Executor) GetTaskMetrics() *TaskHealthMetrics {
+	e.taskStats.mu.RLock()
+	defer e.taskStats.mu.RUnlock()
+
+	metrics := &TaskHealthMetrics{
+		HeartbeatCount:    e.taskStats.heartbeatCount,
+		MetricsCount:      e.taskStats.metricsCount,
+		MetricsFailures:   e.taskStats.metricsFailures,
+		ServiceCheckCount: e.taskStats.serviceCheckCount,
+		InventoryCount:    e.taskStats.inventoryCount,
+	}
+
+	// Only include timestamps if tasks have executed
+	if !e.taskStats.lastHeartbeat.IsZero() {
+		metrics.LastHeartbeat = e.taskStats.lastHeartbeat.Format(time.RFC3339)
+	}
+	if !e.taskStats.lastMetrics.IsZero() {
+		metrics.LastMetrics = e.taskStats.lastMetrics.Format(time.RFC3339)
+	}
+	if !e.taskStats.lastServiceCheck.IsZero() {
+		metrics.LastServiceCheck = e.taskStats.lastServiceCheck.Format(time.RFC3339)
+	}
+	if !e.taskStats.lastInventory.IsZero() {
+		metrics.LastInventory = e.taskStats.lastInventory.Format(time.RFC3339)
+	}
+
+	return metrics
+}
+
+// RecordHeartbeat records a heartbeat execution
+func (e *Executor) RecordHeartbeat() {
+	e.taskStats.mu.Lock()
+	defer e.taskStats.mu.Unlock()
+	e.taskStats.lastHeartbeat = time.Now()
+	e.taskStats.heartbeatCount++
+}
+
+// RecordMetricsSuccess records a successful metrics scrape
+func (e *Executor) RecordMetricsSuccess() {
+	e.taskStats.mu.Lock()
+	defer e.taskStats.mu.Unlock()
+	e.taskStats.lastMetrics = time.Now()
+	e.taskStats.metricsCount++
+}
+
+// RecordMetricsFailure records a failed metrics scrape
+func (e *Executor) RecordMetricsFailure() {
+	e.taskStats.mu.Lock()
+	defer e.taskStats.mu.Unlock()
+	e.taskStats.metricsFailures++
+}
+
+// RecordServiceCheck records a service check execution
+func (e *Executor) RecordServiceCheck() {
+	e.taskStats.mu.Lock()
+	defer e.taskStats.mu.Unlock()
+	e.taskStats.lastServiceCheck = time.Now()
+	e.taskStats.serviceCheckCount++
+}
+
+// RecordInventory records an inventory collection
+func (e *Executor) RecordInventory() {
+	e.taskStats.mu.Lock()
+	defer e.taskStats.mu.Unlock()
+	e.taskStats.lastInventory = time.Now()
+	e.taskStats.inventoryCount++
 }
 
 // RecordCommandSuccess increments success counter

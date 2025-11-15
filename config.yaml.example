@@ -89,7 +89,7 @@ commands:
   
   # Whitelist of allowed PowerShell commands (exact match only)
   allowed_commands:
-    - "Get-Process | Sort-Object CPU -Descending | Select-Object -First 5"
+    - "Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 Name,CPU,WS | ConvertTo-Json -Compress"
     - "Get-NetIPAddress"
     - "Get-EventLog -LogName Application -Newest 10"
   
