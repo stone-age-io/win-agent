@@ -82,16 +82,26 @@ tasks:
 
 # Command Execution
 commands:
+  # PowerShell Scripts Directory (optional)
+  # If specified, any .ps1 file in this directory can be executed by filename
+  # Example: Control plane sends command "Get-EventLog.ps1", agent executes
+  #          C:\ProgramData\WinAgent\Scripts\Get-EventLog.ps1
+  # Benefits: Scripts are version controlled, testable, and self-documenting
+  # Security: Only .ps1 files in this exact directory are allowed (no subdirectories)
+  scripts_directory: "C:\\ProgramData\\WinAgent\\Scripts"
+  
   # Whitelist of services that can be controlled
   allowed_services:
     - "YourCriticalService"
     - "AnotherImportantService"
   
   # Whitelist of allowed PowerShell commands (exact match only)
+  # For simple one-liners (< 5 operations), add them here
+  # For complex commands (> 5 operations), use scripts_directory instead
   allowed_commands:
-    - "Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 Name,CPU,WS | ConvertTo-Json -Compress"
-    - "Get-NetIPAddress"
-    - "Get-EventLog -LogName Application -Newest 10"
+    - "ipconfig /all"
+    - "Get-NetIPAddress | ConvertTo-Json -Compress"
+    - "Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 | ConvertTo-Json -Compress"
   
   # Allowed log file paths (glob patterns supported)
   allowed_log_paths:

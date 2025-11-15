@@ -6,22 +6,6 @@ import (
 	"testing"
 )
 
-// Helper functions for Windows tests (duplicated from logs_test.go for build compatibility)
-func containsString(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && 
-		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr || 
-		indexOf(s, substr) >= 0))
-}
-
-func indexOf(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
-}
-
 // TestIsPathAllowed tests the log path whitelist validation
 // This is CRITICAL for security - prevents unauthorized file access
 // Windows-only because it tests Windows path conventions

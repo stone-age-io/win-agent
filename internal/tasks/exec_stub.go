@@ -12,9 +12,9 @@ import (
 )
 
 // ExecuteCommand is a stub for non-Windows platforms
-func (e *Executor) ExecuteCommand(command string, allowedCommands []string, timeout time.Duration) (string, int, error) {
+func (e *Executor) ExecuteCommand(command string, allowedCommands []string, scriptsDir string, timeout time.Duration) (string, int, error) {
 	// Validate command is in whitelist (for testing)
-	if !isCommandAllowed(command, allowedCommands) {
+	if !isCommandAllowed(command, allowedCommands, scriptsDir) {
 		return "", -1, fmt.Errorf("command not in allowed list")
 	}
 
@@ -28,7 +28,7 @@ func (e *Executor) ExecuteCommand(command string, allowedCommands []string, time
 }
 
 // isCommandAllowed checks if a command exactly matches an entry in the whitelist
-func isCommandAllowed(command string, allowedCommands []string) bool {
+func isCommandAllowed(command string, allowedCommands []string, scriptsDir string) bool {
 	// Normalize whitespace for comparison
 	normalized := normalizeWhitespace(command)
 
@@ -37,6 +37,9 @@ func isCommandAllowed(command string, allowedCommands []string) bool {
 			return true
 		}
 	}
+
+	// Note: Script directory support would be platform-specific
+	// For non-Windows stubs, we only check the allowed commands list
 
 	return false
 }

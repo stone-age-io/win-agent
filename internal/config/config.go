@@ -83,10 +83,11 @@ type InventoryConfig struct {
 
 // CommandsConfig holds command execution settings
 type CommandsConfig struct {
-	AllowedServices []string      `mapstructure:"allowed_services"`
-	AllowedCommands []string      `mapstructure:"allowed_commands"`
-	AllowedLogPaths []string      `mapstructure:"allowed_log_paths"`
-	Timeout         time.Duration `mapstructure:"timeout"` // Command execution timeout
+	ScriptsDirectory string        `mapstructure:"scripts_directory"` // Directory containing allowed PowerShell scripts
+	AllowedServices  []string      `mapstructure:"allowed_services"`
+	AllowedCommands  []string      `mapstructure:"allowed_commands"`
+	AllowedLogPaths  []string      `mapstructure:"allowed_log_paths"`
+	Timeout          time.Duration `mapstructure:"timeout"` // Command execution timeout
 }
 
 // LoggingConfig holds logging settings
@@ -153,6 +154,7 @@ func setDefaults(v *viper.Viper) {
 
 	// Command defaults
 	v.SetDefault("commands.timeout", "30s")
+	v.SetDefault("commands.scripts_directory", "") // Empty by default - feature is optional
 
 	// Logging defaults
 	v.SetDefault("logging.level", "info")
@@ -247,6 +249,18 @@ func validate(cfg *Config) error {
 		if cfg.NATS.TLS.InsecureSkipVerify {
 			// This will be logged as a warning in the agent startup
 			// We don't block it here to allow development/testing scenarios
+		}
+	}
+
+	// Validate scripts directory if specified
+	if cfg.Commands.ScriptsDirectory != "" {
+		// Verify directory exists
+		info, err := os.Stat(cfg.Commands.ScriptsDirectory)
+		if err != nil {
+			return fmt.Errorf("scripts directory not found: %s (%w)", cfg.Commands.ScriptsDirectory, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("scripts_directory must be a directory, not a file: %s", cfg.Commands.ScriptsDirectory)
 		}
 	}
 

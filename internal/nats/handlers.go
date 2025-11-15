@@ -321,7 +321,7 @@ func (h *CommandHandlers) handleLogFetch(msg *nats.Msg) {
 		zap.Int("lines", len(lines)))
 }
 
-// handleCustomExec executes whitelisted PowerShell commands
+// handleCustomExec executes whitelisted PowerShell commands or scripts
 func (h *CommandHandlers) handleCustomExec(msg *nats.Msg) {
 	h.logger.Debug("Received custom exec command")
 
@@ -336,10 +336,11 @@ func (h *CommandHandlers) handleCustomExec(msg *nats.Msg) {
 
 	h.logger.Info("Executing custom command", zap.String("command", req.Command))
 
-	// Execute command with configured timeout
+	// Execute command with configured timeout and scripts directory
 	output, exitCode, err := h.taskExecutor.ExecuteCommand(
 		req.Command,
 		h.config.Commands.AllowedCommands,
+		h.config.Commands.ScriptsDirectory,
 		h.config.Commands.Timeout,
 	)
 	if err != nil {
