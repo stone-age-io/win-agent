@@ -1,8 +1,10 @@
 package tasks
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 
@@ -22,21 +24,81 @@ type SystemMetrics struct {
 	Timestamp            string  `json:"timestamp"`
 }
 
+// createHTTPClient creates an HTTP client with appropriate timeouts for metrics scraping
+// These timeouts prevent indefinite hangs when windows_exporter is slow or unreachable
+func createHTTPClient() *http.Client {
+	return &http.Client{
+		// Overall request timeout (connection + headers + body read)
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			// Time to establish TCP connection
+			// FallbackDelay helps with IPv4/IPv6 dual-stack scenarios
+			DialContext: (&net.Dialer{
+				Timeout:       5 * time.Second,
+				KeepAlive:     30 * time.Second,
+				FallbackDelay: 300 * time.Millisecond,
+			}).DialContext,
+			// Time to complete TLS handshake (if HTTPS)
+			TLSHandshakeTimeout: 5 * time.Second,
+			// Time to receive response headers
+			ResponseHeaderTimeout: 10 * time.Second,
+			// Disable keep-alives to avoid connection reuse issues
+			DisableKeepAlives: true,
+			// Max idle connections
+			MaxIdleConns:        10,
+			MaxIdleConnsPerHost: 2,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
+}
+
 // ScrapeMetrics fetches and parses metrics from windows_exporter
 func (e *Executor) ScrapeMetrics(exporterURL string) (*SystemMetrics, error) {
-	// Fetch metrics from windows_exporter
-	resp, err := http.Get(exporterURL)
+	e.logger.Debug("Starting metrics scrape", zap.String("url", exporterURL))
+
+	// Create HTTP client with timeouts
+	client := createHTTPClient()
+
+	// Create context with timeout for additional safety
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Create request with context
+	req, err := http.NewRequestWithContext(ctx, "GET", exporterURL, nil)
 	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Set User-Agent for identification
+	req.Header.Set("User-Agent", "win-agent/1.0")
+
+	// Execute request
+	e.logger.Debug("Executing HTTP request", zap.String("url", exporterURL))
+	resp, err := client.Do(req)
+	if err != nil {
+		// Provide more context about the error
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("metrics scrape timeout after 30s: %w", err)
+		}
 		return nil, fmt.Errorf("failed to fetch metrics: %w", err)
 	}
 	defer resp.Body.Close()
+
+	e.logger.Debug("Received HTTP response", 
+		zap.Int("status_code", resp.StatusCode),
+		zap.Int64("content_length", resp.ContentLength))
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
+	// Read response body with size limit to prevent memory issues
+	// windows_exporter typically returns 50-200KB, so 10MB is very safe
+	limitedReader := io.LimitReader(resp.Body, 10*1024*1024) // 10MB limit
+
 	// Parse metrics using expfmt
-	metrics, err := e.parsePrometheusMetrics(resp.Body)
+	e.logger.Debug("Parsing Prometheus metrics")
+	metrics, err := e.parsePrometheusMetrics(limitedReader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse metrics: %w", err)
 	}
@@ -47,6 +109,12 @@ func (e *Executor) ScrapeMetrics(exporterURL string) (*SystemMetrics, error) {
 	}
 
 	metrics.Timestamp = time.Now().UTC().Format(time.RFC3339)
+	
+	e.logger.Debug("Metrics scrape completed successfully",
+		zap.Float64("cpu_percent", metrics.CPUUsagePercent),
+		zap.Float64("memory_free_gb", metrics.MemoryFreeGB),
+		zap.Float64("disk_free_percent", metrics.DiskFreePercent))
+
 	return metrics, nil
 }
 
@@ -58,6 +126,7 @@ func (e *Executor) parsePrometheusMetrics(reader io.Reader) (*SystemMetrics, err
 
 	metricFamilies := make(map[string]*dto.MetricFamily)
 
+	// Parse all metric families
 	for {
 		mf := &dto.MetricFamily{}
 		err := decoder.Decode(mf)
@@ -69,6 +138,8 @@ func (e *Executor) parsePrometheusMetrics(reader io.Reader) (*SystemMetrics, err
 		}
 		metricFamilies[mf.GetName()] = mf
 	}
+
+	e.logger.Debug("Parsed metric families", zap.Int("count", len(metricFamilies)))
 
 	// Debug: Log available metric families (only first time)
 	e.metricsCache.mu.RLock()
@@ -112,7 +183,6 @@ func (e *Executor) parsePrometheusMetrics(reader io.Reader) (*SystemMetrics, err
 
 		// Lock the cache for reading and writing
 		e.metricsCache.mu.Lock()
-		defer e.metricsCache.mu.Unlock()
 
 		// Only calculate if we have a previous measurement
 		if !e.metricsCache.lastTimestamp.IsZero() && totalTime > 0 && e.metricsCache.lastCPUTotal > 0 {
@@ -142,7 +212,7 @@ func (e *Executor) parsePrometheusMetrics(reader io.Reader) (*SystemMetrics, err
 		e.metricsCache.lastCPUTotal = totalTime
 		e.metricsCache.lastCPUIdle = idleTime
 
-		// Note: defer unlock will happen at end of function
+		e.metricsCache.mu.Unlock()
 	}
 
 	// Extract memory free bytes and convert to GB
